@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from "react";
+import { removeBackground } from "@imgly/background-removal";
 
 const CREDIT_PACKS = [
   { credits: 2000, price: 7, images: 20 },
@@ -11,6 +12,8 @@ const CREDIT_PACKS = [
 export default function ClearUpscale() {
   const [page, setPage] = useState("home");
   const [image, setImage] = useState(null);
+  const [resultImage, setResultImage] = useState(null);
+  const [imageFile, setImageFile] = useState(null);
   const [imageName, setImageName] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [mode, setMode] = useState(null);
@@ -23,34 +26,175 @@ export default function ClearUpscale() {
   const [email, setEmail] = useState("");
   const [pw, setPw] = useState("");
   const fileRef = useRef(null);
-  const timer = useRef(null);
 
   const onFiles = useCallback((files) => {
     const f = files[0];
     if (!f || !f.type.startsWith("image/")) return;
     setImageName(f.name);
+    setImageFile(f);
     const r = new FileReader();
     r.onload = (e) => { setImage(e.target.result); setPage("choose"); };
     r.readAsDataURL(f);
   }, []);
 
-  const process = (m) => {
-    setMode(m); setPage("processing"); setProgress(0);
-    const st = m === "both"
-      ? [{a:5,l:"Analyzing image..."},{a:15,l:"Detecting subject..."},{a:30,l:"Removing background..."},{a:50,l:"Refining edges..."},{a:65,l:"Upscaling (2x)..."},{a:82,l:"Enhancing details..."},{a:95,l:"Finalizing..."}]
-      : [{a:5,l:"Analyzing image..."},{a:20,l:"Preparing upscale..."},{a:45,l:"Upscaling (2x)..."},{a:70,l:"Enhancing details..."},{a:90,l:"Sharpening..."},{a:95,l:"Finalizing..."}];
-    setStage(st[0].l);
-    let c = 0;
-    if (timer.current) clearInterval(timer.current);
-    timer.current = setInterval(() => {
-      c += Math.random()*2.2+0.4;
-      if (c >= 100) { c=100; clearInterval(timer.current); setTimeout(() => { setPage("result"); if(plan!=="free") setCredits(v=>v-(m==="both"?100:75)); }, 400); }
-      setProgress(Math.min(c,100));
-      for(let i=st.length-1;i>=0;i--) if(c>=st[i].a){setStage(st[i].l);break;}
-    }, 180);
+  const process = async (m) => {
+    setMode(m);
+    setPage("processing");
+    setProgress(0);
+    setStage("Loading AI model...");
+
+    try {
+      if (m === "both") {
+        const blob = await removeBackground(imageFile, {
+          progress: (key, current, total) => {
+            if (key === "compute:inference") {
+              const pct = Math.round((current / total) * 60) + 20;
+              setProgress(Math.min(pct, 80));
+              if (pct < 40) setStage("Detecting subject...");
+              else if (pct < 60) setStage("Removing background...");
+              else setStage("Refining edges...");
+            } else {
+              const pct = Math.round((current / total) * 20);
+              setProgress(Math.min(pct, 20));
+              setStage("Loading AI model...");
+            }
+          }
+        });
+
+        setProgress(85);
+        setStage("Upscaling image...");
+
+        const img = new Image();
+        const blobUrl = URL.createObjectURL(blob);
+        img.src = blobUrl;
+        await new Promise((resolve) => { img.onload = resolve; });
+
+        const scale = 2;
+        const canvas = document.createElement("canvas");
+        canvas.width = img.width * scale;
+        canvas.height = img.height * scale;
+        const ctx = canvas.getContext("2d");
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        URL.revokeObjectURL(blobUrl);
+
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const data = imageData.data;
+        const w = canvas.width;
+        const h = canvas.height;
+        const copy = new Uint8ClampedArray(data);
+        const kernel = [0, -1, 0, -1, 5.2, -1, 0, -1, 0];
+        for (let y = 1; y < h - 1; y++) {
+          for (let x = 1; x < w - 1; x++) {
+            for (let c = 0; c < 3; c++) {
+              let val = 0;
+              for (let ky = -1; ky <= 1; ky++) {
+                for (let kx = -1; kx <= 1; kx++) {
+                  const idx = ((y + ky) * w + (x + kx)) * 4 + c;
+                  val += copy[idx] * kernel[(ky + 1) * 3 + (kx + 1)];
+                }
+              }
+              data[(y * w + x) * 4 + c] = Math.min(255, Math.max(0, val));
+            }
+          }
+        }
+        ctx.putImageData(imageData, 0, 0);
+
+        setProgress(95);
+        setStage("Finalizing...");
+
+        const resultUrl = canvas.toDataURL("image/png");
+        setResultImage(resultUrl);
+
+} else {
+        setStage("Preparing image...");
+        setProgress(10);
+
+        const img = new Image();
+        img.src = image;
+        await new Promise((resolve) => { img.onload = resolve; });
+
+        setStage("Upscaling image (2x)...");
+        setProgress(30);
+
+        const scale = 2;
+        const canvas = document.createElement("canvas");
+        canvas.width = img.width * scale;
+        canvas.height = img.height * scale;
+        const ctx = canvas.getContext("2d");
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+        setStage("Sharpening details...");
+        setProgress(50);
+
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const data = imageData.data;
+        const w = canvas.width;
+        const h = canvas.height;
+        const copy = new Uint8ClampedArray(data);
+
+        const kernel = [0, -1, 0, -1, 5.2, -1, 0, -1, 0];
+
+        for (let y = 1; y < h - 1; y++) {
+          for (let x = 1; x < w - 1; x++) {
+            for (let c = 0; c < 3; c++) {
+              let val = 0;
+              for (let ky = -1; ky <= 1; ky++) {
+                for (let kx = -1; kx <= 1; kx++) {
+                  const idx = ((y + ky) * w + (x + kx)) * 4 + c;
+                  val += copy[idx] * kernel[(ky + 1) * 3 + (kx + 1)];
+                }
+              }
+              data[(y * w + x) * 4 + c] = Math.min(255, Math.max(0, val));
+            }
+          }
+        }
+
+        setStage("Enhancing colors...");
+        setProgress(75);
+
+        for (let i = 0; i < data.length; i += 4) {
+          data[i] = Math.min(255, data[i] * 1.02 + 2);
+          data[i + 1] = Math.min(255, data[i + 1] * 1.02 + 2);
+          data[i + 2] = Math.min(255, data[i + 2] * 1.02 + 2);
+        }
+
+        ctx.putImageData(imageData, 0, 0);
+
+        setProgress(95);
+        setStage("Finalizing...");
+
+        await new Promise((resolve) => setTimeout(resolve, 300));
+
+        const resultUrl = canvas.toDataURL("image/png");
+        setResultImage(resultUrl);
+      }
+
+      setProgress(100);
+      setTimeout(() => {
+        if (plan !== "free") setCredits(v => v - (m === "both" ? 100 : 75));
+        setPage("result");
+      }, 400);
+
+    } catch (error) {
+      console.error("Processing error:", error);
+      setStage("Error: " + error.message);
+    }
   };
 
-  const reset = () => { setImage(null); setImageName(""); setMode(null); setProgress(0); setStage(""); setPage("home"); if(timer.current)clearInterval(timer.current); };
+  const reset = () => {
+    setImage(null);
+    setResultImage(null);
+    setImageFile(null);
+    setImageName("");
+    setMode(null);
+    setProgress(0);
+    setStage("");
+    setPage("home");
+  };
 
   const nb = {padding:"7px 14px",borderRadius:7,border:"1px solid rgba(255,255,255,0.08)",background:"transparent",color:"#999",fontSize:13,cursor:"pointer",fontFamily:"'Outfit',sans-serif",fontWeight:500};
   const is = {padding:"13px 14px",borderRadius:9,fontSize:14,border:"1px solid rgba(255,255,255,0.08)",background:"rgba(255,255,255,0.03)",color:"#fff",fontFamily:"'DM Sans',sans-serif",outline:"none",width:"100%",boxSizing:"border-box"};
@@ -156,9 +300,10 @@ export default function ClearUpscale() {
           <div style={{height:"100%",borderRadius:3,background:"linear-gradient(90deg,#6C5CE7,#00B894)",width:`${progress}%`,transition:"width 0.3s"}}/>
         </div>
         <p style={{color:"#444",fontSize:11,marginTop:10,fontFamily:"'DM Mono',monospace"}}>{Math.round(progress)}%</p>
+        {stage.startsWith("Loading AI model") && <p style={{color:"#555",fontSize:11,marginTop:16,textAlign:"center",maxWidth:300}}>First time takes longer while the AI model downloads. It will be cached for future use.</p>}
       </div>}
 
-      {page==="result"&&<ResultPage image={image} imageName={imageName} mode={mode} plan={plan} reset={reset} setPage={setPage}/>}
+      {page==="result"&&<ResultPage image={image} resultImage={resultImage} imageName={imageName} mode={mode} plan={plan} reset={reset} setPage={setPage}/>}
 
       {page==="pricing"&&<div style={{padding:"44px 24px 80px",maxWidth:860,margin:"0 auto",animation:"fu 0.4s ease"}}>
         <div style={{textAlign:"center",marginBottom:40}}>
@@ -228,7 +373,7 @@ export default function ClearUpscale() {
 }
 
 /* ── RESULT PAGE WITH COMPARISON SLIDER ── */
-function ResultPage({ image, imageName, mode, plan, reset, setPage }) {
+function ResultPage({ image, resultImage, imageName, mode, plan, reset, setPage }) {
   const [sliderPos, setSliderPos] = useState(50);
   const containerRef = useRef(null);
   const isDragging = useRef(false);
@@ -257,6 +402,8 @@ function ResultPage({ image, imageName, mode, plan, reset, setPage }) {
 
   const chk = (c) => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2.5" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>;
 
+  const displayResult = resultImage || image;
+
   return (
     <div style={{display:"flex",flexDirection:"column",alignItems:"center",padding:"44px 24px 80px",maxWidth:660,margin:"0 auto",animation:"fu 0.4s ease"}}>
       <div style={{display:"inline-flex",alignItems:"center",gap:6,padding:"5px 14px",borderRadius:100,background:"rgba(0,184,148,0.08)",border:"1px solid rgba(0,184,148,0.2)",marginBottom:18}}>
@@ -265,7 +412,6 @@ function ResultPage({ image, imageName, mode, plan, reset, setPage }) {
       <h2 style={{fontFamily:"'Outfit',sans-serif",fontSize:24,fontWeight:600,color:"#fff",margin:"0 0 6px",textAlign:"center"}}>{mode==="both"?"Background removed & upscaled":"Image upscaled"}</h2>
       <p style={{color:"#8888a0",fontSize:13,margin:"0 0 24px"}}>{imageName}</p>
 
-      {/* ── COMPARISON SLIDER ── */}
       <div
         ref={containerRef}
         onMouseDown={() => { isDragging.current = true; }}
@@ -275,30 +421,23 @@ function ResultPage({ image, imageName, mode, plan, reset, setPage }) {
           position:"relative",cursor:"ew-resize",userSelect:"none",background:"#111114",minHeight:260
         }}
       >
-        {/* BEFORE (original) - full image underneath */}
         <img src={image} alt="Before" style={{width:"100%",display:"block",maxHeight:420,objectFit:"contain"}}/>
 
-        {/* AFTER (result) - clipped from the right */}
-        <div style={{
+<div style={{
           position:"absolute",inset:0,
           clipPath:`inset(0 ${100 - sliderPos}% 0 0)`,
-          background: mode==="both"
-            ? "repeating-conic-gradient(rgba(255,255,255,0.04) 0% 25%,transparent 0% 50%) 0 0/18px 18px"
-            : "#111114"
+          background: "repeating-conic-gradient(#ffffff 0% 25%, #e0e0e0 0% 50%) 0 0/20px 20px"
         }}>
-          <img src={image} alt="After" style={{
-            width:"100%",display:"block",maxHeight:420,objectFit:"contain",
-            filter: mode==="both" ? "contrast(1.05) saturate(1.1)" : "contrast(1.08) sharpen(1)"
+          <img src={displayResult} alt="After" style={{
+            width:"100%",display:"block",maxHeight:420,objectFit:"contain"
           }}/>
         </div>
 
-        {/* SLIDER LINE */}
         <div style={{
           position:"absolute",top:0,bottom:0,left:`${sliderPos}%`,width:3,
           background:"#fff",transform:"translateX(-50%)",zIndex:10,
           boxShadow:"0 0 12px rgba(0,0,0,0.5)"
         }}>
-          {/* HANDLE */}
           <div style={{
             position:"absolute",top:"50%",left:"50%",transform:"translate(-50%,-50%)",
             width:40,height:40,borderRadius:"50%",
@@ -316,23 +455,25 @@ function ResultPage({ image, imageName, mode, plan, reset, setPage }) {
           </div>
         </div>
 
-        {/* LABELS */}
         <div style={{position:"absolute",bottom:12,left:14,padding:"4px 10px",borderRadius:6,background:"rgba(0,0,0,0.7)",fontSize:11,fontWeight:600,color:"#fff",zIndex:5}}>Before</div>
         <div style={{position:"absolute",bottom:12,right:14,padding:"4px 10px",borderRadius:6,background:"rgba(0,0,0,0.7)",fontSize:11,fontWeight:600,color:"#fff",zIndex:5}}>After</div>
       </div>
 
       <p style={{color:"#555",fontSize:12,marginTop:10}}>Drag the slider to compare before and after</p>
 
-      {/* BUTTONS */}
       <div style={{display:"flex",gap:10,marginTop:20}}>
-        <button style={{padding:"13px 28px",borderRadius:10,border:"none",cursor:"pointer",background:"linear-gradient(135deg,#6C5CE7,#5A4BD1)",color:"#fff",fontSize:14,fontWeight:600,fontFamily:"'Outfit',sans-serif",display:"flex",alignItems:"center",gap:7}}>
+        <button onClick={() => {
+          const a = document.createElement("a");
+          a.href = displayResult;
+          a.download = `clearupscale-${Date.now()}.png`;
+          a.click();
+        }} style={{padding:"13px 28px",borderRadius:10,border:"none",cursor:"pointer",background:"linear-gradient(135deg,#6C5CE7,#5A4BD1)",color:"#fff",fontSize:14,fontWeight:600,fontFamily:"'Outfit',sans-serif",display:"flex",alignItems:"center",gap:7}}>
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           Download
         </button>
         <button onClick={reset} style={{padding:"13px 28px",borderRadius:10,cursor:"pointer",border:"1px solid rgba(255,255,255,0.1)",background:"rgba(255,255,255,0.03)",color:"#bbb",fontSize:14,fontWeight:500,fontFamily:"'Outfit',sans-serif"}}>Process another</button>
       </div>
 
-      {/* UPGRADE NUDGE */}
       {plan==="free"&&<div style={{marginTop:36,padding:"18px 24px",borderRadius:12,border:"1px solid rgba(108,92,231,0.15)",background:"rgba(108,92,231,0.04)",textAlign:"center",maxWidth:400}}>
         <p style={{color:"#fff",fontSize:14,fontWeight:500,margin:"0 0 4px",fontFamily:"'Outfit',sans-serif"}}>Want faster & higher resolution?</p>
         <p style={{color:"#8888a0",fontSize:12,margin:"0 0 12px"}}>Up to 10 images at once · 2x faster · Higher resolution</p>
